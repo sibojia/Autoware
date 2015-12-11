@@ -41,15 +41,22 @@
 //#undef NDEBUG
 #include <assert.h>
 
+#include <tf/transform_broadcaster.h>
+#include <geometry_msgs/PoseStamped.h>
+#include <std_msgs/Bool.h>
+
+#include <geo_pos_conv.hh>
+
 #include "ros/ros.h"
 #include "tablet_socket/gear_cmd.h"
 #include "tablet_socket/mode_cmd.h"
 #include "tablet_socket/route_cmd.h"
 
 #define NODE_NAME	"tablet_receiver"
-#define TOPIC_NR	(3)
+#define TOPIC_NR	(5)
 
 #define DEFAULT_PORT	(5666)
+#define DEFAULT_PLANE	(7)
 
 static int getConnect(int, int *, int *);
 static int getSensorValue(int, ros::Publisher[TOPIC_NR]);
@@ -107,6 +114,8 @@ void Launch::stop()
 
 static Launch s1("check.launch"), s2("set.launch");
 
+static geo_pos_conv geo;
+
 void stopChildProcess(int signo)
 {
 	s1.stop();
@@ -117,7 +126,7 @@ void stopChildProcess(int signo)
 int main(int argc, char *argv[])
 {
 	ros::Publisher pub[TOPIC_NR];
-	int port;
+	int port, plane;
 	int sock, asock;
 
 	struct sigaction act;
@@ -133,8 +142,13 @@ int main(int argc, char *argv[])
 	pub[0] = node.advertise<tablet_socket::gear_cmd>("gear_cmd", 1);
 	pub[1] = node.advertise<tablet_socket::mode_cmd>("mode_cmd", 1);
 	pub[2] = node.advertise<tablet_socket::route_cmd>("route_cmd", 1);
+	pub[3] = node.advertise<geometry_msgs::PoseStamped>("gnss_pose", 1);
+	pub[4] = node.advertise<std_msgs::Bool>("gnss_stat", 1);
 	node.param<int>("tablet_receiver/port", port, DEFAULT_PORT);
+	node.param<int>("tablet_receiver/plane", plane, DEFAULT_PLANE);
 	fprintf(stderr, "listen port=%d\n", port);
+
+	geo.set_plane(plane);
 
 	//get connect to android
 	sock = -1;
@@ -208,10 +222,19 @@ static int getConnect(int port, int *sock, int *asock)
 static int getSensorValue(int sock, ros::Publisher pub[TOPIC_NR])
 {
 	int info[2];
+	size_t size = sizeof(info);
+	ssize_t nbytes;
 
-	if(recv(sock, info, sizeof(info), 0) == -1) {
-		perror("recv");
-		return -1;
+	for (char *p = (char *)info; size; size -= nbytes, p += nbytes) {
+		nbytes = recv(sock, info, size, 0);
+		if (nbytes == -1) {
+			perror("recv");
+			return -1;
+		}
+		if (nbytes == 0) {
+			fprintf(stderr, "peer is shutdown\n");
+			return -1;
+		}
 	}
 	fprintf(stderr, "info=%d value=%d\n", info[0], info[1]);
 
@@ -229,23 +252,17 @@ static int getSensorValue(int sock, ros::Publisher pub[TOPIC_NR])
 		break;
 	}
 	case 3: { // ROUTE
-		tablet_socket::route_cmd msg;
-		tablet_socket::Waypoint point;
-		size_t size = info[1];
-		double *points;
-		int points_nr;
-		ssize_t nbytes;
-
+		size = info[1];
 		if (!size)
 			break;
 
-		points = (double *)malloc(size);
+		double *points = (double *)malloc(size);
 		if (points == NULL) {
 			perror("malloc");
 			return -1;
 		}
 
-		points_nr = size / sizeof(double);
+		int points_nr = size / sizeof(double);
 
 		for (char *p = (char *)points; size;
 		     size -= nbytes, p += nbytes) {
@@ -255,8 +272,15 @@ static int getSensorValue(int sock, ros::Publisher pub[TOPIC_NR])
 				free(points);
 				return -1;
 			}
+			if (nbytes == 0) {
+				fprintf(stderr, "peer is shutdown\n");
+				free(points);
+				return -1;
+			}
 		}
 
+		tablet_socket::route_cmd msg;
+		tablet_socket::Waypoint point;
 		for (int i = 0; i < points_nr; i++) {
 			if (i % 2) {
 				point.lon = points[i];
@@ -282,6 +306,70 @@ static int getSensorValue(int sock, ros::Publisher pub[TOPIC_NR])
 			s2.start();
 		else
 			s2.stop();
+		break;
+	}
+	case 6: { // POSE
+		size = info[1];
+		if (!size)
+			break;
+
+		double *buf = (double *)malloc(size);
+		if (buf == NULL) {
+			perror("malloc");
+			return -1;
+		}
+
+		for (char *p = (char *)buf; size;
+		     size -= nbytes, p += nbytes) {
+			nbytes = recv(sock, p, size, 0);
+			if (nbytes == -1) {
+				perror("recv");
+				free(buf);
+				return -1;
+			}
+			if (nbytes == 0) {
+				fprintf(stderr, "peer is shutdown\n");
+				free(buf);
+				return -1;
+			}
+		}
+
+		geo.llh_to_xyz(buf[0], buf[1], buf[2]);
+
+		tf::Transform transform;
+		tf::Quaternion q;
+		transform.setOrigin(tf::Vector3(geo.y(), geo.x(), geo.z()));
+		q.setRPY(buf[4], buf[5], buf[3]);
+		transform.setRotation(q);
+
+		free(buf);
+
+		ros::Time now = ros::Time::now();
+
+		tf::TransformBroadcaster br;
+		br.sendTransform(tf::StampedTransform(transform, now, "map",
+						      "gps"));
+
+		geometry_msgs::PoseStamped pose;
+		pose.header.stamp = now;
+		pose.header.frame_id = "map";
+		pose.pose.position.x = geo.y();
+		pose.pose.position.y = geo.x();
+		pose.pose.position.z = geo.z();
+		pose.pose.orientation.x = q.x();
+		pose.pose.orientation.y = q.y();
+		pose.pose.orientation.z = q.z();
+		pose.pose.orientation.w = q.w();
+
+		std_msgs::Bool stat;
+		if (pose.pose.position.x == 0 || pose.pose.position.y == 0 ||
+		    pose.pose.position.z == 0)
+			stat.data = false;
+		else
+			stat.data = true;
+
+		pub[3].publish(pose);
+		pub[4].publish(stat);
 		break;
 	}
 	default: // TERMINATOR

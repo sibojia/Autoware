@@ -27,80 +27,31 @@ Open-source software for urban autonomous driving. The following functions are s
 
 ## Requirements
 
-- ROS indigo(Ubuntu 13.10, 14.04) or ROS hydro(Ubuntu 13.04)
-- OpenCV 2.4.8 or higher
+- ROS indigo(Ubuntu 14.04) or ROS jade(Ubuntu 15.04)
+- OpenCV 2.4.8 or higher **NOTE: Autoware does not support OpenCV 3. Please use OpenCV 2**
 - Qt 5.2.1 or higher
 - CUDA(Optional)
 - FlyCapture2(optional)
 - Armadillo
 
+**Please use checkout revision before 2015/OCT/21 if you use Autoware on ROS hydro or Ubuntu 13.04, 13.10.**
+
 ### Install dependencies for Ubuntu 14.04 indigo
 
 ```
-% sudo apt-get install ros-indigo-desktop-full ros-indigo-nmea-msgs ros-indigo-sound-play
-% sudo apt-get install libnlopt-dev freeglut3-dev qtbase5-dev libqt5opengl5-dev libssh2-1-dev libarmadillo-dev
+% sudo apt-get install ros-indigo-desktop-full ros-indigo-nmea-msgs ros-indigo-nmea-navsat-driver ros-indigo-sound-play
+% sudo apt-get install libnlopt-dev freeglut3-dev qtbase5-dev libqt5opengl5-dev libssh2-1-dev libarmadillo-dev libpcap-dev
 ```
 
-### Install dependencies for Ubuntu 13.10 indigo and Ubuntu 13.04 hydro
+**NOTE: Please do not install ros-indigo-velodyne-pointcloud package. Please uninstall it if you already installed.**
+
+
+### Install dependencies for Ubuntu 15.04 jade
 
 ```
-% sudo apt-get install ros-hydro-desktop-full ros-indigo-nmea-msgs ros-hydro-sound-play
-% sudo apt-get install libnlopt-dev freeglut3-dev libssh2-1-dev libarmadillo-dev
+% sudo apt-get install ros-jade-desktop-full ros-jade-nmea-msgs ros-jade-nmea-navsat-driver ros-jade-sound-play
+% sudo apt-get install libnlopt-dev freeglut3-dev qt5-default libqt5opengl5-dev libssh2-1-dev libarmadillo-dev libpcap-dev
 ```
-
-### Install Velodyne Driver dependencies 
-```
-% sudo apt-get install libpcap-dev
-% mkdir -p ~/ros_drivers/src
-% cd ~/ros_drivers/src 
-% catkin_init_workspace
-% git clone https://github.com/ros-drivers/velodyne.git
-% cd ~/ros_drivers 
-% catkin_make
-% source devel/setup.bash
-```
-
-You cannot build **Autoware/ros** source code with those OpenCV and Qt5 packages,
-because they are too old. So you have to install newer versions of OpenCV and Qt5.
-
-#### Install OpenCV
-
-You can download the source code from [here](http://sourceforge.net/projects/opencvlibrary/).
-
-```
-% unzip opencv-2.4.8.zip
-% cd opencv-2.4.8
-% cmake .
-% make
-% make install
-```
-
-#### Install Qt 5
-
-The installation document is [here](http://qt-project.org/wiki/Building_Qt_5_from_Git).
-
-First you have to install Qt5 dependencies.
-
-```
-% sudo apt-get build-dep qt5-default
-% sudo apt-get install build-essential perl python git
-% sudo apt-get install "^libxcb.*" libx11-xcb-dev libglu1-mesa-dev libxrender-dev libxi-dev
-% sudo apt-get install flex bison gperf libicu-dev libxslt-dev ruby
-% sudo apt-get install libssl-dev libxcursor-dev libxcomposite-dev libxdamage-dev libxrandr-dev libfontconfig1-dev
-% sudo apt-get install libasound2-dev libgstreamer0.10-dev libgstreamer-plugins-base0.10-dev
-```
-
-```
-% git clone git://code.qt.io/qt/qt5.git
-% cd qt5
-% git checkout v5.2.1 # <- Same as Ubuntu 14.04 'qtbase5-dev'
-% perl init-repository --no-webkit # <- webkit is very too large
-% ./configure -developer-build -opensource -nomake examples -nomake tests # And accept the license 
-% make -j # You may take a few hours
-% make install
-% sudo cp -r qtbase /usr/local/qtbase5
-```
-[This page](http://code.qt.io/cgit/qt/qtbase.git/commit/?id=9d2edfe5248fce8b16693fad8304f94a1f101bab) could help you when `make` returns error.
 
 ## How to Build
 
@@ -119,6 +70,13 @@ $ ./catkin_make_release
 $ cd $HOME/Autoware/ros
 $ ./run
 ```
+
+## For developers
+
+Be careful for changing files under `ros/src/sensing/drivers/lidar/packages/velodyne`. There is **subtree**.
+Original repository is [here](https://github.com/CPFL/velodyne). If you change those files from this
+repository, you must use **git subtree push**. (Please never change and push code if you don't understand
+`git subtree` well).
 
 ## Documents
 

@@ -26,7 +26,6 @@ execute_process(
 
 set(CMAKE_CXX_FLAGS "-std=c++11 -O2 -Wall ${CMAKE_CXX_FLAGS}")
 
-
 ## Generate messages in the 'msg' folder
  add_message_files(
    FILES
@@ -42,8 +41,6 @@ set(CMAKE_CXX_FLAGS "-std=c++11 -O2 -Wall ${CMAKE_CXX_FLAGS}")
    std_msgs 
    geometry_msgs
  )
-
-#set(CMAKE_CXX_FLAGS "-std=c++11 -O2 -Wall ${CMAKE_CXX_FLAGS}")
 
 include_directories(
   ${catkin_INCLUDE_DIRS}

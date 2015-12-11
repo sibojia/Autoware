@@ -55,19 +55,21 @@ import syslog
 import rtmgr
 import rospy
 import std_msgs.msg
+import ctypes
 from std_msgs.msg import Bool
 from decimal import Decimal
+from runtime_manager.msg import ConfigRcnn
 from runtime_manager.msg import ConfigCarDpm
 from runtime_manager.msg import ConfigPedestrianDpm
 from runtime_manager.msg import ConfigNdt
 from runtime_manager.msg import ConfigNdtMapping
 from runtime_manager.msg import ConfigNdtMappingOutput
-from runtime_manager.msg import ConfigLaneFollower
+from runtime_manager.msg import ConfigWaypointFollower
+from runtime_manager.msg import ConfigTwistFilter
 from runtime_manager.msg import ConfigVelocitySet
 from runtime_manager.msg import ConfigCarKf
 from runtime_manager.msg import ConfigPedestrianKf
 from runtime_manager.msg import ConfigLaneRule
-from runtime_manager.msg import ConfigWaypointLoader
 from runtime_manager.msg import ConfigCarFusion
 from runtime_manager.msg import ConfigPedestrianFusion
 from tablet_socket.msg import mode_cmd
@@ -84,6 +86,12 @@ from runtime_manager.msg import indicator_cmd
 from runtime_manager.msg import lamp_cmd
 from runtime_manager.msg import traffic_light
 from runtime_manager.msg import adjust_xy
+
+libc = ctypes.CDLL("libc.so.6")
+SCHED_OTHER = ctypes.c_int(0)
+SCHED_FIFO = ctypes.c_int(1)
+SCHED_RR = ctypes.c_int(2)
+
 
 class MyFrame(rtmgr.MyFrame):
 	def __init__(self, *args, **kwds):
@@ -137,6 +145,21 @@ class MyFrame(rtmgr.MyFrame):
 				rospy.Subscriber(topic, msg, self.exec_time_callback, callback_args=(key, attr))
 
 		#
+		# for Setup tab
+		#
+		tab = self.tab_setup
+		self.all_tabs.append(tab)
+
+		setup_cmd = {}
+		self.all_cmd_dics.append(setup_cmd)
+		dic = self.load_yaml('setup.yaml')
+		
+		self.add_params(dic.get('params', []))
+		self.setup_buttons(dic.get('buttons', {}), setup_cmd)
+		for nm in [ 'setup_tf', 'vehicle_model' ]:
+			self.set_param_panel(self.obj_get('button_' + nm), self.obj_get('panel_' + nm))
+
+		#
 		# for Map tab
 		#
 		tab = self.tab_map
@@ -151,7 +174,7 @@ class MyFrame(rtmgr.MyFrame):
 
 		self.setup_buttons(self.map_dic.get('buttons', {}), self.map_cmd)
 
-		for nm in [ 'point_cloud', 'vector_map', 'area_lists', 'tf' ]:
+		for nm in [ 'point_cloud', 'vector_map', 'area_lists', 'tf', 'pcd_filter', 'pcd_binarizer' ]:
 			btn = self.obj_get('button_' + nm)
 			pnl = self.obj_get('panel_' + nm)
 			self.set_param_panel(btn, pnl)
@@ -162,6 +185,8 @@ class MyFrame(rtmgr.MyFrame):
 		self.label_point_cloud_bar.Destroy()
 		self.label_point_cloud_bar = BarLabel(tab, '  Loading...  ')
 		self.label_point_cloud_bar.Enable(False)
+
+		self.pcd_loaded = False
 
 		#
 		# for Sensing tab
@@ -202,17 +227,18 @@ class MyFrame(rtmgr.MyFrame):
 
 		self.add_params(items.get('params', []))
 
+		self.sys_gdic = items.get('sys_gui')
+		self.sys_gdic['update_func'] = self.update_func
+
 		self.computing_cmd = {}
 		self.all_cmd_dics.append(self.computing_cmd)
 		for i in range(2):
 			tree_ctrl = self.create_tree(parent, items['subs'][i], None, None, self.computing_cmd)
 			tree_ctrl.ExpandAll()
-			tree_ctrl.SetHyperTextVisitedColour(tree_ctrl.GetHyperTextNewColour()) # no change
 			tree_ctrl.SetBackgroundColour(wx.NullColour)
 			setattr(self, 'tree_ctrl_' + str(i), tree_ctrl)
 
 		self.Bind(CT.EVT_TREE_ITEM_CHECKED, self.OnTreeChecked)
-		self.Bind(CT.EVT_TREE_ITEM_HYPERLINK, self.OnTreeHyperlinked)
 
 		self.setup_buttons(items.get('buttons', {}), self.computing_cmd)
 
@@ -258,7 +284,6 @@ class MyFrame(rtmgr.MyFrame):
 		self.tree_ctrl_data.Destroy()
 		tree_ctrl = self.create_tree(parent, dic, None, None, self.data_cmd)
 		tree_ctrl.ExpandAll()
-		tree_ctrl.SetHyperTextVisitedColour(tree_ctrl.GetHyperTextNewColour()) # no change
 		tree_ctrl.SetBackgroundColour(wx.NullColour)
 		self.tree_ctrl_data = tree_ctrl
 
@@ -327,14 +352,17 @@ class MyFrame(rtmgr.MyFrame):
 
 		self.setup_buttons(self.status_dic.get('buttons', {}), self.status_cmd)
 
-		font = self.label_top_cmd.GetFont()
-		font.SetFamily(wx.FONTFAMILY_MODERN)
+		font = wx.Font(10, wx.FONTFAMILY_MODERN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
 		self.label_top_cmd.SetFont(font)
 
 		#
 		# for All
 		#
 		self.nodes_dic = self.nodes_dic_get()
+
+		self.bitmap_logo.Destroy()
+		bm = scaled_bitmap(wx.Bitmap(rtmgr_src_dir() + 'autoware_logo_1.png'), 0.2)
+		self.bitmap_logo = wx.StaticBitmap(self, wx.ID_ANY, bm)
 
 		rtmgr.MyFrame.__do_layout(self)
 
@@ -356,6 +384,7 @@ class MyFrame(rtmgr.MyFrame):
 		# Topics tab (need, after layout for sizer)
 		self.topics_dic = self.load_yaml('topics.yaml')
 		self.topics_list = []
+		self.topics_echo_curr_topic = None
 		self.topics_echo_proc = None
 		self.topics_echo_thinf = None
 
@@ -382,18 +411,19 @@ class MyFrame(rtmgr.MyFrame):
 		backup = os.path.expanduser('~/.toprc-autoware-backup')
 		self.toprc_setup(toprc, backup)
 
-		# get top cmd cpu N
-		s = subprocess.check_output(['sh', '-c', 'top -b -n 1 | grep ^%Cpu | wc -l']).strip()
-		cpu_n = int(s)
-
-		cpu_ibls = [ InfoBarLabel(self, 'CPU'+str(i)) for i in range(cpu_n) ]
-		sz = wx.BoxSizer(wx.HORIZONTAL)
-		for ibl in cpu_ibls:
-			sz.Add(ibl, 1, wx.EXPAND, 0)
+		cpu_ibls = [ InfoBarLabel(self, 'CPU'+str(i)) for i in range(psutil.NUM_CPUS) ]
+		sz = sizer_wrap(cpu_ibls, wx.HORIZONTAL, 1, wx.EXPAND, 0)
 		self.sizer_cpuinfo.Add(sz, 8, wx.ALL | wx.EXPAND, 4)
 
-		ibl = InfoBarLabel(self, 'Memory')
-		self.sizer_cpuinfo.Add(ibl, 2, wx.ALL | wx.EXPAND, 4)
+		self.lb_top5 = []
+		for i in range(5):
+			lb = wx.StaticText(self, wx.ID_ANY, '')
+			change_font_point_by_rate(lb, 0.75)
+			self.lb_top5.append(lb)
+		line = wx.StaticLine(self, wx.ID_ANY)
+		ibl = InfoBarLabel(self, 'Memory', bar_orient=wx.HORIZONTAL)
+		szr = sizer_wrap(self.lb_top5 + [ line, ibl ], flag=wx.EXPAND | wx.FIXED_MINSIZE)
+		self.sizer_cpuinfo.Add(szr, 2, wx.ALL | wx.EXPAND, 4)
 
 		th_arg = { 'setting':self.status_dic.get('top_cmd_setting', {}),
 			   'cpu_ibls':cpu_ibls, 'mem_ibl':ibl, 
@@ -432,7 +462,10 @@ class MyFrame(rtmgr.MyFrame):
 				subprocess.call([ 'mkdir', '-p', path ])
 
 		# icon
-		self.SetIcon( wx.Icon(rtmgr_src_dir() + 'rtmgr_icon.xpm', wx.BITMAP_TYPE_XPM) )
+		bm = scaled_bitmap(wx.Bitmap(rtmgr_src_dir() + 'autoware_logo_2_white.png'), 0.5)
+		icon = wx.EmptyIcon()
+		icon.CopyFromBitmap(bm)
+		self.SetIcon(icon)
 
 	def __do_layout(self):
 		pass
@@ -443,7 +476,7 @@ class MyFrame(rtmgr.MyFrame):
 		save_dic = {}
 		for (name, pdic) in self.load_dic.items():
 			if pdic and pdic != {}:
-				prm = get_top([ cfg.get('param') for cfg in self.config_dic.values() if cfg.get('name') == name ], {})
+				prm = next( (cfg.get('param') for cfg in self.config_dic.values() if cfg.get('name') == name), {})
 				no_saves = prm.get('no_save_vars', [])
 				pdic = pdic.copy()
 				for k in pdic.keys():
@@ -479,7 +512,8 @@ class MyFrame(rtmgr.MyFrame):
 
 	def setup_buttons(self, d, run_dic):
 		for (k,d2) in d.items():
-			obj = get_top( self.key_objs_get([ 'button_', 'button_launch_', 'checkbox_' ], k) )
+			pfs = [ 'button_', 'button_launch_', 'checkbox_' ]
+			obj = next( (self.obj_get(pf+k) for pf in pfs if self.obj_get(pf+k)), None)
 			if not obj:
 				s = 'button_launch_' + k
 				setattr(self, s, s)
@@ -568,14 +602,14 @@ class MyFrame(rtmgr.MyFrame):
 		msg = std_msgs.msg.Bool(False)
 		for k in gdic.get('stat_topic', []):
 			# exec_time off
-			if get_top([ dic for dic in exec_time.values() if k in dic ]):
+			if next( (dic for dic in exec_time.values() if k in dic), None):
 				self.exec_time_callback(std_msgs.msg.Float32(0), (k, 'data'))
 			else:
 				self.stat_callback(msg, k)
 
 		# Quick Start tab, exec_time off
 		obj_nm = self.name_get(obj)
-		nm = get_top([ nm for nm in qs_nms if 'button_' + nm + '_qs' == obj_nm ])
+		nm = next( (nm for nm in qs_nms if 'button_' + nm + '_qs' == obj_nm), None)
 		for key in exec_time.get(nm, {}):
 			self.exec_time_callback(std_msgs.msg.Float32(0), (key, 'data'))
 
@@ -583,6 +617,8 @@ class MyFrame(rtmgr.MyFrame):
 		self.route_cmd_waypoint = data.point
 
 	def stat_callback(self, msg, k):
+		if k == 'pmap' and msg.data and not self.pcd_loaded:
+			return
 		self.stat_dic[k] = msg.data
 		if k == 'pmap':
 			v = self.stat_dic.get(k)
@@ -594,7 +630,7 @@ class MyFrame(rtmgr.MyFrame):
 	def exec_time_callback(self, msg, (key, attr)):
 		msec = int(getattr(msg, attr, 0))
 		exec_time = self.qs_dic.get('exec_time', {})
-		(nm, dic) = get_top([ (nm, dic) for (nm, dic) in exec_time.items() if key in dic ])
+		(nm, dic) = next( ( (nm, dic) for (nm, dic) in exec_time.items() if key in dic), None)
 		dic[ key ] = msec
 		lb = self.obj_get('label_' + nm + '_qs')
 		if lb:
@@ -621,8 +657,11 @@ class MyFrame(rtmgr.MyFrame):
 	def OnChecked_obj(self, obj):
 		self.OnLaunchKill_obj(obj)
 
-	def OnTreeHyperlinked(self, event):
-		self.OnHyperlinked_obj(event.GetItem())
+	#def OnTreeHyperlinked(self, event):
+	#	self.OnHyperlinked_obj(event.GetItem())
+
+	def OnHyperlinked(self, event):
+		self.OnHyperlinked_obj(event.GetEventObject())
 
 	def OnHyperlinked_obj(self, obj):
 		(pdic, gdic, prm) = self.obj_to_pdic_gdic_prm(obj)
@@ -697,15 +736,23 @@ class MyFrame(rtmgr.MyFrame):
 				if var.get('kind') == 'path':
 					str_v = path_expand_cmd(str_v)
 					str_v = os.path.expandvars(os.path.expanduser(str_v))
+
+					relpath_from = var.get('relpath_from')
+					if relpath_from:
+						relpath_from = path_expand_cmd(relpath_from)
+						relpath_from = os.path.expandvars(os.path.expanduser(relpath_from))
+						str_v = os.path.relpath(str_v, relpath_from)
 				add += delim + str_v
 			if add != '':
 				s += add + ' '
 		return s.strip(' ').split(' ') if s != '' else None
 
-	def obj_to_pdic_gdic_prm(self, obj):
+	def obj_to_pdic_gdic_prm(self, obj, sys=False):
 		info = self.config_dic.get(obj)
 		if info is None:
-			info = get_top([ v for v in self.config_dic.values() if v.get('obj') is obj ])
+			sys_prm = self.get_param('sys')
+			prm_chk = lambda prm : prm is sys_prm if sys else prm is not sys_prm
+			info = next( ( v for v in self.config_dic.values() if v.get('obj') is obj and prm_chk(v.get('param')) ), None)
 			if info is None:
 				return (None, None, None)
 		pdic = info.get('pdic')
@@ -716,6 +763,10 @@ class MyFrame(rtmgr.MyFrame):
 	def obj_to_gdic(self, obj, def_ret=None):
 		(_, gdic, _) = self.obj_to_pdic_gdic_prm(obj) if obj else (None, None, None)
 		return gdic if gdic else def_ret
+
+	def cfg_prm_to_obj(self, arg_dic):
+		return next( ( d.get('obj') for d in self.config_dic.values() \
+			if all( [ d.get(k) == v for (k,v) in arg_dic.items() ] ) ), None)
 
 	def update_func(self, pdic, gdic, prm):
 		pdic_empty = (pdic == {})
@@ -738,6 +789,55 @@ class MyFrame(rtmgr.MyFrame):
 			self.publish_param_topic(pdic, prm)
 		self.rosparam_set(pdic, prm)
 		self.update_depend_enable(pdic, gdic, prm)
+
+		sys_gdic = getattr(self, 'sys_gdic', None)
+		obj = self.cfg_prm_to_obj( { 'pdic':pdic , 'gdic':sys_gdic , 'param':prm } )
+		self.update_proc_cpu(obj, pdic, prm)
+
+	def update_proc_cpu(self, obj, pdic=None, prm=None):
+		if obj is None or not obj.GetValue():
+			return
+		(_, _, proc) = self.obj_to_cmd_dic_cmd_proc(obj)
+		if proc is None:
+			return
+		if pdic is None or prm is None:
+			(pdic, _, prm) = self.obj_to_pdic_gdic_prm(obj, sys=True)
+
+		cpu_chks = self.param_value_get(pdic, prm, 'cpu_chks')
+		cpu_chks = cpu_chks if cpu_chks else [ True for i in range(psutil.NUM_CPUS) ]
+		cpus = [ i for i in range(psutil.NUM_CPUS) if cpu_chks[i] ]
+		nice = self.param_value_get(pdic, prm, 'nice', 0)
+
+		d = { 'OTHER':SCHED_OTHER, 'FIFO':SCHED_FIFO, 'RR':SCHED_RR }
+		policy = SCHED_OTHER
+		priority = 0
+		if self.param_value_get(pdic, prm, 'real_time', False):
+			policy = d.get(self.param_value_get(pdic, prm, 'policy', 'FIFO'), SCHED_FIFO)
+			priority = self.param_value_get(pdic, prm, 'prio', 0)
+
+		procs = [ proc ] + proc.get_children(recursive=True)
+		for proc in procs:
+			print 'pid={}'.format(proc.pid)
+			if proc.get_nice() != nice:
+				print 'nice {} -> {}'.format(proc.get_nice(), nice)
+				if set_process_nice(proc, nice) is False:
+					print 'Err set_process_nice()'
+			if proc.get_cpu_affinity() != cpus:
+				print 'cpus {} -> {}'.format(proc.get_cpu_affinity(), cpus)
+				if set_process_cpu_affinity(proc, cpus) is False:
+					print 'Err set_process_cpu_affinity()'
+
+			policy_str = next( (k for (k,v) in d.items() if v == policy), '?')
+			print 'sched policy={} prio={}'.format(policy_str, priority)
+			if set_scheduling_policy(proc, policy, priority) is False:
+				print 'Err scheduling_policy()'
+
+	def param_value_get(self, pdic, prm, name, def_ret=None):
+		def_ret = self.param_default_value_get(prm, name, def_ret)
+		return pdic.get(name, def_ret)
+
+	def param_default_value_get(self, prm, name, def_ret=None):
+		return next( (var.get('v') for var in prm.get('vars') if var.get('name') == name ), def_ret)
 
 	def update_depend_enable(self, pdic, gdic, prm):
 		for var in prm.get('vars', []):
@@ -920,12 +1020,10 @@ class MyFrame(rtmgr.MyFrame):
 
 	def add_config_link(self, dic, panel, obj):
 		cfg_obj = wx.HyperlinkCtrl(panel, wx.ID_ANY, '[config]', '')
-		cfg_obj.SetVisitedColour(cfg_obj.GetNormalColour()) # no change
+		fix_link_color(cfg_obj)
 		self.Bind(wx.EVT_HYPERLINK, self.OnConfig, cfg_obj)
-		hszr = wx.BoxSizer(wx.HORIZONTAL)
-		hszr.Add(obj)
-		hszr.Add(wx.StaticText(panel, wx.ID_ANY, '  '))
-		hszr.Add(cfg_obj)
+		add_objs = (obj, wx.StaticText(panel, wx.ID_ANY, '  '), cfg_obj)
+		hszr = sizer_wrap(add_objs, wx.HORIZONTAL)
 		name = dic['name']
 		pdic = self.load_dic_pdic_setup(name, dic)
 		gdic = self.gdic_get_1st(dic)
@@ -1000,7 +1098,7 @@ class MyFrame(rtmgr.MyFrame):
 			os.execvp('top', ['top'])
 		else: #parent
 			sec = 0.2
-			for s in ['1', 'W', 'q']:
+			for s in ['1', 'c', 'W', 'q']:
 				time.sleep(sec)
 				os.write(fd, s)
 
@@ -1029,11 +1127,12 @@ class MyFrame(rtmgr.MyFrame):
 		mem_ibl.lmt_bar_prg = rate_mem
 
 		alerted = False
-		cpu_n = len(cpu_ibls)
+		cpu_n = psutil.NUM_CPUS
 
 		while not ev.wait(interval):
-			s = subprocess.check_output(['top', '-b', '-n', '2', '-d', '0.1']).strip()
-			s = s[s.rfind('top -'):]
+			s = subprocess.check_output(['sh', '-c', 'env COLUMNS=512 top -b -n 2 -d 0.1']).strip()
+			i = s.rfind('\ntop -') + 1
+			s = s[i:]
 			wx.CallAfter(self.label_top_cmd.SetLabel, s)
 			wx.CallAfter(self.label_top_cmd.GetParent().FitInside)
 
@@ -1088,6 +1187,24 @@ class MyFrame(rtmgr.MyFrame):
 			if not is_alert and alerted:
 				th_end(thinf)
 				alerted = False
+
+			# top5
+			i = s.find('\n\n') + 2
+			lst = s[i:].split('\n')
+			hd = lst[0]
+			top5 = lst[1:1+5]
+
+			i = hd.rfind('COMMAND')
+			cmds = [ line[i:].split(' ')[0] for line in top5 ]
+
+			i = hd.find('%CPU')
+			loads = [ line[i-1:].strip().split(' ')[0] for line in top5 ]
+			
+			for (lb, cmd, load) in zip(self.lb_top5, cmds, loads):
+				col = self.info_col(float(load), rate_per_cpu_yellow, rate_per_cpu, (64,64,64), (200,0,0))
+				wx.CallAfter(lb.SetForegroundColour, col)
+				wx.CallAfter(lb.SetLabel, cmd + ' (' + load + ' %CPU)')
+
 		self.toprc_restore(toprc, backup)
 
 	def alert_th(self, bgcol, ev):
@@ -1172,6 +1289,13 @@ class MyFrame(rtmgr.MyFrame):
 				continue
 			wx.CallAfter(append_tc_limit, tc, s)
 
+			# que clear
+			if self.checkbox_stdout.GetValue() is False and \
+			   self.checkbox_stderr.GetValue() is False and \
+			   que.qsize() > 0:
+				que_clear(que)
+				wx.CallAfter(tc.Clear)
+
 	#
 	# for Topics tab
 	#
@@ -1190,7 +1314,7 @@ class MyFrame(rtmgr.MyFrame):
 			obj = wx.HyperlinkCtrl(panel, wx.ID_ANY, topic, '')
 			self.Bind(wx.EVT_HYPERLINK, self.OnTopicLink, obj)
 			szr.Add(obj, 0, wx.LEFT, 4)
-			obj.SetVisitedColour(obj.GetNormalColour())
+			fix_link_color(obj)
 			self.topics_list.append(obj)
 		szr.Layout()
 		panel.SetVirtualSize(szr.GetMinSize())
@@ -1211,10 +1335,18 @@ class MyFrame(rtmgr.MyFrame):
 		wx.CallAfter(tc.Clear)
 		wx.CallAfter(tc.Enable, True)
 		self.topics_echo_sum = 0
+		self.topic_echo_curr_topic = None
+
+	def OnEcho(self, event):
+		if self.checkbox_topics_echo.GetValue() and self.topic_echo_curr_topic:
+			self.topics_proc_th_start(self.topic_echo_curr_topic)
+		else:
+			self.topics_proc_th_end()
 
 	def OnTopicLink(self, event):
 		obj = event.GetEventObject()
 		topic = obj.GetLabel()
+		self.topic_echo_curr_topic = topic
 
 		# info
 		info = subprocess.check_output([ 'rostopic', 'info', topic ]).strip()
@@ -1224,12 +1356,13 @@ class MyFrame(rtmgr.MyFrame):
 
 		# echo
 		self.topics_proc_th_end()
-		self.topics_proc_th_start(topic)
+		if self.checkbox_topics_echo.GetValue():
+			self.topics_proc_th_start(topic)
 
 	def topics_proc_th_start(self, topic):
 		out = subprocess.PIPE
 		err = subprocess.STDOUT
-		self.topics_echo_proc = subprocess.Popen([ 'rostopic', 'echo', topic ], stdout=out, stderr=err)
+		self.topics_echo_proc = psutil.Popen([ 'rostopic', 'echo', topic ], stdout=out, stderr=err)
 
 		self.topics_echo_thinf = th_start(self.topics_echo_th)
 		
@@ -1263,6 +1396,8 @@ class MyFrame(rtmgr.MyFrame):
 			if self.checkbox_topics_echo.GetValue():
 				self.topics_echo_que.put(s)
 
+		que_clear(self.topics_echo_que)
+
 	def topics_echo_show_th(self, ev):
 		que = self.topics_echo_que
 		interval = self.topics_dic.get('gui_update_interval_ms', 100) * 0.001
@@ -1275,7 +1410,10 @@ class MyFrame(rtmgr.MyFrame):
 			if qsz > chars_limit:
 				over = qsz - chars_limit
 				for i in range(over):
-					que.get(timeout=1)
+					try:
+						que.get(timeout=1)
+					except Queue.Empty:
+						break
 				qsz = chars_limit
 			arr = []
 			for i in range(qsz):
@@ -1347,9 +1485,7 @@ class MyFrame(rtmgr.MyFrame):
 	def set_param_panel(self, obj, parent):
 		(pdic, gdic, prm) = self.obj_to_pdic_gdic_prm(obj)
 		panel = ParamPanel(parent, frame=self, pdic=pdic, gdic=gdic, prm=prm)
-		szr = wx.BoxSizer(wx.VERTICAL)
-		szr.Add(panel, 0, wx.EXPAND)
-		parent.SetSizer(szr)
+		sizer_wrap((panel,), wx.VERTICAL, 0, wx.EXPAND, 0, parent)
 		k = 'ext_toggle_enables'
 		gdic[ k ] = gdic.get(k, []) + [ panel ]
 
@@ -1377,17 +1513,17 @@ class MyFrame(rtmgr.MyFrame):
 		return gdic
 
 	def get_cfg_obj(self, obj):
-		return get_top( [ k for (k,v) in self.config_dic.items() if v['obj'] is obj ] )
+		return next( (k for (k,v) in self.config_dic.items() if v['obj'] is obj), None)
 
 	def add_cfg_info(self, cfg_obj, obj, name, pdic, gdic, run_disable, prm):
 		self.config_dic[ cfg_obj ] = { 'obj':obj , 'name':name , 'pdic':pdic , 'gdic':gdic, 
 					       'run_disable':run_disable , 'param':prm }
 
 	def get_param(self, prm_name):
-		return get_top( [ prm for prm in self.params if prm['name'] == prm_name ] )
+		return next( (prm for prm in self.params if prm['name'] == prm_name), None)
 
 	def obj_to_cmd_dic(self, obj):
-		return get_top( [ cmd_dic for cmd_dic in self.all_cmd_dics if obj in cmd_dic ] )
+		return next( (cmd_dic for cmd_dic in self.all_cmd_dics if obj in cmd_dic), None)
 
 	def obj_to_cmd_dic_cmd_proc(self, obj):
 		cmd_dic = self.obj_to_cmd_dic(obj)
@@ -1472,6 +1608,8 @@ class MyFrame(rtmgr.MyFrame):
 		(_, _, proc) = self.obj_to_cmd_dic_cmd_proc(obj)
 		if proc != proc_bak:
 			self.toggle_enable_obj(obj)
+		if proc:
+			self.update_proc_cpu(obj)
 
 	def OnRosbagPlay(self, event):
 		obj = event.GetEventObject()
@@ -1517,6 +1655,7 @@ class MyFrame(rtmgr.MyFrame):
 		if n == 0:
 			return
 		i = 0
+		self.pcd_loaded = False
 		while not ev.wait(0):
 			s = self.stdout_file_search(file, 'load ')
 			if not s:
@@ -1527,6 +1666,7 @@ class MyFrame(rtmgr.MyFrame):
 			else:
 				i -= 1
 				print s
+			self.pcd_loaded = (i == n)
 			wx.CallAfter(self.label_point_cloud_bar.set, 100 * i / n)
 		wx.CallAfter(self.label_point_cloud_bar.clear)
 
@@ -1606,7 +1746,7 @@ class MyFrame(rtmgr.MyFrame):
 		return get_top(self.alias_grp_get(obj), obj)
 
 	def alias_grp_get(self, obj):
-		return get_top([ grp for grp in self.alias_grps if obj in grp ], [])
+		return next( (grp for grp in self.alias_grps if obj in grp), [])
 
 	def create_tree(self, parent, items, tree, item, cmd_dic):
 		name = items.get('name', '')
@@ -1620,17 +1760,30 @@ class MyFrame(rtmgr.MyFrame):
 			if 'cmd' in items:
 				cmd_dic[item] = (items['cmd'], None)
 
-			if 'param' in items:
-				prm = self.get_param(items.get('param'))
-				gdic = self.gdic_get_1st(items)
 				pdic = self.load_dic_pdic_setup(name, items)
-				self.add_cfg_info(item, item, name, pdic, gdic, False, prm)
-				if 'no_link' not in gdic.get('flags', []):
-					item.SetHyperText()
+				pnl = wx.Panel(tree, wx.ID_ANY)
+				lkc_sys = self.new_link(item, name, pdic, self.sys_gdic, pnl, 'sys', 'sys')
+				add_objs = [ wx.StaticText(pnl, wx.ID_ANY, '['), lkc_sys, wx.StaticText(pnl, wx.ID_ANY, ']') ]
+				gdic = self.gdic_get_1st(items)
+				if 'param' in items and 'no_link' not in gdic.get('flags', []):
+					lkc = self.new_link(item, name, pdic, gdic, pnl, 'app', items.get('param'))
+					add_objs += [ wx.StaticText(pnl, wx.ID_ANY, ' ') ]
+					add_objs += [ wx.StaticText(pnl, wx.ID_ANY, '['), lkc, wx.StaticText(pnl, wx.ID_ANY, ']') ]
+				szr = sizer_wrap(add_objs, wx.HORIZONTAL, parent=pnl)
+				szr.Fit(pnl)
+				tree.SetItemWindow(item, pnl)
 
 		for sub in items.get('subs', []):
 			self.create_tree(parent, sub, tree, item, cmd_dic)
 		return tree
+
+	def new_link(self, item, name, pdic, gdic, pnl, link_str, prm_name):
+		lkc = wx.HyperlinkCtrl(pnl, wx.ID_ANY, link_str, "")
+		fix_link_color(lkc)
+		self.Bind(wx.EVT_HYPERLINK, self.OnHyperlinked, lkc)
+		prm = self.get_param(prm_name)
+		self.add_cfg_info(lkc, item, name, pdic, gdic, False, prm)
+		return lkc
 
 	def load_dic_pdic_setup(self, name, dic):
 		name = dic.get('share_val', dic.get('name', name))
@@ -1690,7 +1843,7 @@ class MyFrame(rtmgr.MyFrame):
 
 	def proc_to_cmd_dic_obj(self, proc):
 		for cmd_dic in self.all_cmd_dics:
-			obj = get_top( [ obj for (obj, v) in cmd_dic.items() if proc in v ] )
+			obj = next( (obj for (obj, v) in cmd_dic.items() if proc in v), None)
 			if obj:
 				return (cmd_dic, obj)
 		return (None, None)
@@ -1719,7 +1872,7 @@ class MyFrame(rtmgr.MyFrame):
 			if f == self.log_th:
 				err = subprocess.PIPE
 
-			proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=out, stderr=err)
+			proc = psutil.Popen(args, stdin=subprocess.PIPE, stdout=out, stderr=err)
 			self.all_procs.append(proc)
 			self.all_procs_nodes[ proc ] = self.nodes_dic.get(obj, [])
 
@@ -1852,19 +2005,19 @@ class MyFrame(rtmgr.MyFrame):
 		name = self.name_get(obj)
 		if name is None:
 			return (None, None)
-		return get_top( [ ( name[:len(pf)], name[len(pf):] ) for pf in pfs if name[:len(pf)] == pf ] )
+		return next( ( ( name[:len(pf)], name[len(pf):] ) for pf in pfs if name[:len(pf)] == pf ), None)
 
 	def obj_key_get(self, obj, pfs):
 		name = self.name_get(obj)
 		if name is None:
 			return None
-		return get_top( [ name[len(pf):] for pf in pfs if name[:len(pf)] == pf ] )
+		return next( (name[len(pf):] for pf in pfs if name[:len(pf)] == pf), None)
 
 	def key_objs_get(self, pfs, key):
 		return [ self.obj_get(pf + key) for pf in pfs if self.obj_get(pf + key) ]
 
 	def name_get(self, obj):
-		return get_top( [ nm for nm in dir(self) if getattr(self, nm) is obj ] )
+		return next( (nm for nm in dir(self) if getattr(self, nm) is obj), None)
 
 	def val_get(self, name):
 		obj = self.obj_get(name)
@@ -1876,7 +2029,7 @@ class MyFrame(rtmgr.MyFrame):
 		return getattr(self, name, None)
 
 	def key_get(self, dic, val):
-		return get_top( [ k for (k,v) in dic.items() if v == val ] )
+		return next( (k for (k,v) in dic.items() if v == val), None)
 
 #class MyDialog(rtmgr.MyDialog):
 #	def __init__(self, *args, **kwds):
@@ -1920,7 +2073,7 @@ class ParamPanel(wx.Panel):
 		self.prm = kwds.pop('prm')
 		wx.Panel.__init__(self, *args, **kwds)
 
-		obj = get_top( [ v.get('obj') for (cfg_obj, v) in self.frame.config_dic.items() if v.get('param') is self.prm ] )
+		obj = next( (v.get('obj') for (cfg_obj, v) in self.frame.config_dic.items() if v.get('param') is self.prm), None)
 		(_, _, proc) = self.frame.obj_to_cmd_dic_cmd_proc(obj)
 
 		hszr = None
@@ -1929,7 +2082,13 @@ class ParamPanel(wx.Panel):
 		szr = wx.BoxSizer(wx.VERTICAL)
 
 		topic_szrs = (None, None)
-		for var in self.prm.get('vars'):
+
+		vars = self.prm.get('vars')
+		if self.gdic.get('show_order'):
+			var_lst = lambda name, vars : [ var for var in vars if var.get('name') == name ]
+			vars = reduce( lambda lst, name : lst + var_lst(name, vars), self.gdic.get('show_order'), [] )
+
+		for var in vars:
 			name = var.get('name')
 
 			if not gdic_dialog_type_chk(self.gdic, name):
@@ -1960,7 +2119,7 @@ class ParamPanel(wx.Panel):
 					szr = static_box_sizer(self, 'topic : ' + self.prm.get('topic'))
 					bak[0].Add(szr, 0, wx.EXPAND | wx.ALL, 4)
 			targ_szr = szr
-			if vp.has_slider or vp.kind =='path':
+			if vp.is_nl():
 				hszr = None if hszr else hszr
 				flag |= wx.EXPAND
 			else:
@@ -1978,7 +2137,8 @@ class ParamPanel(wx.Panel):
 			user_category = gdic_v.get('user_category')
 			if user_category is not None and hszr:
 				user_szr = static_box_sizer(self, user_category, orient=wx.HORIZONTAL)
-				targ_szr.Add(user_szr, 0, 0, 0)
+				(flgs, bdr) = gdic_v.get('user_category_add', [ [], 0 ])
+				targ_szr.Add(user_szr, 0, wx_flag_get(flgs), bdr)
 				targ_szr = hszr = user_szr
 
 			targ_szr.Add(vp, prop, flag, border)
@@ -2055,11 +2215,22 @@ class VarPanel(wx.Panel):
 			self.obj = wx.Choice(self, wx.ID_ANY, choices=choices)
 			self.choices_sel_set(v)
 			self.Bind(wx.EVT_CHOICE, self.OnUpdate, self.obj)
+			if label:
+				lb = wx.StaticText(self, wx.ID_ANY, label)
+				flag = wx.LEFT | wx.ALIGN_CENTER_VERTICAL
+				sizer_wrap((lb, self.obj), wx.HORIZONTAL, 0, flag, 4, self)
 			return
 		if self.kind == 'checkbox':
 			self.obj = wx.CheckBox(self, wx.ID_ANY, label)
 			self.obj.SetValue(v)
 			self.Bind(wx.EVT_CHECKBOX, self.OnUpdate, self.obj)
+			return
+		if self.kind == 'checkboxes':
+			item_n = self.var.get('item_n', 1)
+			if type(item_n) is str:
+				item_n = eval(item_n)
+			self.obj = Checkboxes(self, item_n, label)
+			self.obj.set(v)
 			return
 		if self.kind == 'toggle_button':
 			self.obj = wx.ToggleButton(self, wx.ID_ANY, label)
@@ -2084,7 +2255,7 @@ class VarPanel(wx.Panel):
 		self.tc = wx.TextCtrl(self, wx.ID_ANY, str(v), style=wx.TE_PROCESS_ENTER)
 		self.Bind(wx.EVT_TEXT_ENTER, self.OnUpdate, self.tc)
 
-		if self.kind is None:
+		if self.kind in ('num', None):
 			if self.has_slider:
 				self.w = self.max - self.min
 				vlst = [ v, self.min, self.max, self.var['v'] ]
@@ -2110,7 +2281,7 @@ class VarPanel(wx.Panel):
 			self.ref.SetMinSize((40,29))
 			szr.Add(self.ref, 0, flag, 4)
 
-		if self.has_slider:
+		if self.has_slider or self.kind == 'num':
 			vszr = wx.BoxSizer(wx.VERTICAL)
 			vszr.Add( self.create_bmbtn("inc.png", self.OnIncBtn) )
 			vszr.Add( self.create_bmbtn("dec.png", self.OnDecBtn) )
@@ -2131,6 +2302,8 @@ class VarPanel(wx.Panel):
 			return self.choices_sel_get()
 		if self.kind in [ 'checkbox', 'toggle_button' ]:
 			return self.obj.GetValue()
+		if self.kind == 'checkboxes':
+			return self.obj.get()
 		if self.kind == 'hide':
 			return self.var.get('v')
 		if self.kind in [ 'path', 'str' ]:
@@ -2181,7 +2354,8 @@ class VarPanel(wx.Panel):
 		self.tc.SetValue(str(ov + step))
 		v = self.get_v()
 		if v != ov:
-			self.slider.SetValue(self.get_int_v())
+			if self.has_slider:
+				self.slider.SetValue(self.get_int_v())
 			self.update()
 
 	def OnUpdate(self, event):
@@ -2202,6 +2376,9 @@ class VarPanel(wx.Panel):
 		else:
 			self.obj.SetSelection(v)
 
+	def is_nl(self):
+		return self.has_slider or self.kind in [ 'path' ]
+
 class MyDialogParam(rtmgr.MyDialogParam):
 	def __init__(self, *args, **kwds):
 		pdic = kwds.pop('pdic')
@@ -2217,9 +2394,7 @@ class MyDialogParam(rtmgr.MyDialogParam):
 		parent = self.panel_v
 		frame = self.GetParent()
 		self.panel = ParamPanel(parent, frame=frame, pdic=pdic, gdic=gdic, prm=prm)
-		szr = wx.BoxSizer(wx.VERTICAL)
-		szr.Add(self.panel, 1, wx.EXPAND)
-		parent.SetSizer(szr)
+		szr = sizer_wrap((self.panel,), wx.VERTICAL, 1, wx.EXPAND, 0, parent)
 
 		self.SetTitle(prm.get('name', ''))
 		(w,h) = self.GetSize()
@@ -2251,9 +2426,7 @@ class MyDialogDpm(rtmgr.MyDialogDpm):
 		frame = self.GetParent()
 		self.frame = frame
 		self.panel = ParamPanel(parent, frame=frame, pdic=pdic, gdic=gdic, prm=prm)
-		szr = wx.BoxSizer(wx.VERTICAL)
-		szr.Add(self.panel, 1, wx.EXPAND)
-		parent.SetSizer(szr)
+		szr = sizer_wrap((self.panel,), wx.VERTICAL, 1, wx.EXPAND, 0, parent)
 
 		self.SetTitle(prm.get('name', ''))
 		(w,h) = self.GetSize()
@@ -2262,10 +2435,8 @@ class MyDialogDpm(rtmgr.MyDialogDpm):
 		if w2 > w:
 			self.SetSize((w2,h))
 
-		hl = self.hyperlink_car
-		hl.SetVisitedColour(hl.GetNormalColour())
-		hl = self.hyperlink_pedestrian
-		hl.SetVisitedColour(hl.GetNormalColour())
+		fix_link_color(self.hyperlink_car)
+		fix_link_color(self.hyperlink_pedestrian)
 
 	def OnOk(self, event):
 		self.panel.update()
@@ -2292,10 +2463,8 @@ class MyDialogCarPedestrian(rtmgr.MyDialogCarPedestrian):
 
 		self.SetTitle(prm.get('name', ''))
 
-		hl = self.hyperlink_car
-		hl.SetVisitedColour(hl.GetNormalColour())
-		hl = self.hyperlink_pedestrian
-		hl.SetVisitedColour(hl.GetNormalColour())
+		fix_link_color(self.hyperlink_car)
+		fix_link_color(self.hyperlink_pedestrian)
 
 	def OnLink(self, event):
 		obj = event.GetEventObject()
@@ -2344,9 +2513,7 @@ class MyDialogNdtMapping(rtmgr.MyDialogNdtMapping):
 		parent = self.panel_v
 		frame = self.GetParent()
 		self.panel = ParamPanel(parent, frame=frame, pdic=self.pdic, gdic=self.gdic, prm=self.prm)
-		szr = wx.BoxSizer(wx.VERTICAL)
-		szr.Add(self.panel, 1, wx.EXPAND)
-		parent.SetSizer(szr)
+		sizer_wrap((self.panel,), wx.VERTICAL, 1, wx.EXPAND, 0, parent)
 
 		self.update_filename()
 		self.klass_msg = ConfigNdtMappingOutput
@@ -2384,20 +2551,26 @@ class MyDialogNdtMapping(rtmgr.MyDialogNdtMapping):
 		self.EndModal(0)
 
 class InfoBarLabel(wx.BoxSizer):
-	def __init__(self, parent, btm_txt=None, lmt_bar_prg=90):
+	def __init__(self, parent, btm_txt=None, lmt_bar_prg=90, bar_orient=wx.VERTICAL):
 		wx.BoxSizer.__init__(self, orient=wx.VERTICAL)
 		self.lb = wx.StaticText(parent, wx.ID_ANY, '')
+		self.bar = BarLabel(parent, hv=bar_orient, show_lb=False)
+		bt = wx.StaticText(parent, wx.ID_ANY, btm_txt) if btm_txt else None
+
 		self.Add(self.lb, 0, wx.ALIGN_CENTER_HORIZONTAL, 0)
-
-		self.bar = BarLabel(parent, hv=wx.VERTICAL, show_lb=False)
-		sz = self.bar.GetSize()
-		sz.SetWidth(20)
-		self.bar.SetMinSize(sz)
-		self.Add(self.bar, 1, wx.ALIGN_CENTER_HORIZONTAL, 0)
-
-		if btm_txt:
-			bt = wx.StaticText(parent, wx.ID_ANY, btm_txt)
-			self.Add(bt, 0, wx.ALIGN_CENTER_HORIZONTAL, 0)
+		if bar_orient == wx.VERTICAL:		
+			sz = self.bar.GetSize()
+			sz.SetWidth(20)
+			self.bar.SetMinSize(sz)
+			self.Add(self.bar, 1, wx.ALIGN_CENTER_HORIZONTAL, 0)
+			if bt:
+				self.Add(bt, 0, wx.ALIGN_CENTER_HORIZONTAL, 0)
+		else:
+			szr = wx.BoxSizer(wx.HORIZONTAL)
+			if bt:
+				szr.Add(bt, 0, 0, 0)
+			szr.Add(self.bar, 1, 0, 0)
+			self.Add(szr, 1, wx.EXPAND, 0)
 
 		self.lmt_bar_prg = lmt_bar_prg
 
@@ -2412,6 +2585,29 @@ class InfoBarLabel(wx.BoxSizer):
 			(col1, col2) = (wx.Color(250,0,0), wx.Color(128,0,0)) 
 		self.bar.set_col(col1, col2)
 		self.bar.set(prg)
+
+class Checkboxes(wx.Panel):
+	def __init__(self, parent, item_n, lb):
+		wx.Panel.__init__(self, parent, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize)
+		self.boxes = [ wx.CheckBox(self, wx.ID_ANY, lb + str(i)) for i in range(item_n) ]
+		vsz = wx.BoxSizer(wx.VERTICAL)
+		for j in range((item_n + 7) / 8):
+			hsz = wx.BoxSizer(wx.HORIZONTAL)
+			for i in range(8):
+				idx = j * 8 + i
+				if idx < len(self.boxes):
+					hsz.Add(self.boxes[idx], 0, wx.LEFT, 8)
+			vsz.Add(hsz)
+		self.SetSizer(vsz)
+		vsz.Fit(self)
+
+	def set(self, vs):
+		vs = vs if vs else [ True for box in self.boxes ]
+		for (box, v) in zip(self.boxes, vs):
+			box.SetValue(v)
+
+	def get(self):
+		return [ box.GetValue() for box in self.boxes ]
 
 class BarLabel(wx.Panel):
 	def __init__(self, parent, txt='', pos=wx.DefaultPosition, size=wx.DefaultSize, style=0, hv=wx.HORIZONTAL, show_lb=True):
@@ -2470,10 +2666,7 @@ class ColorLabel(wx.Panel):
 		dc = wx.PaintDC(self)
 		dc.Clear()
 
-		font = dc.GetFont()
-		pt = font.GetPointSize()
-		#font.SetPointSize(pt * 3 / 4)
-		dc.SetFont(font)
+		#change_font_point_by_rate(dc, 0.75)
 
 		(x,y) = (0,0)
 		(_, h, _, _) = dc.GetFullTextExtent(' ')
@@ -2650,6 +2843,10 @@ def th_end((th, ev)):
 	ev.set()
 	th.join()
 
+def que_clear(que):
+	with que.mutex:
+		que.queue.clear()
+
 def append_tc_limit(tc, s, rm_chars=0):
 	if rm_chars > 0:
 		tc.Remove(0, rm_chars)
@@ -2665,6 +2862,34 @@ def cut_esc(s):
 			break
 		s = s[:i] + s[j+1:]
 	return s
+
+def change_font_point_by_rate(obj, rate=1.0):
+	font = obj.GetFont()
+	pt = font.GetPointSize()
+	pt = int(pt * rate)
+	font.SetPointSize(pt)
+	obj.SetFont(font)
+
+def fix_link_color(obj):
+	t = type(obj)
+	if t is CT.GenericTreeItem or t is CT.CustomTreeCtrl:
+		obj.SetHyperTextVisitedColour(obj.GetHyperTextNewColour())
+	elif t is wx.HyperlinkCtrl:
+		obj.SetVisitedColour(obj.GetNormalColour())
+
+def scaled_bitmap(bm, scale):
+	(w, h) = bm.GetSize()
+	img = wx.ImageFromBitmap(bm)
+	img = img.Scale(w * scale, h * scale, wx.IMAGE_QUALITY_HIGH)
+	return wx.BitmapFromImage(img)
+
+def sizer_wrap(add_objs, orient=wx.VERTICAL, prop=0, flag=0, border=0, parent=None):
+	szr = wx.BoxSizer(orient)
+	for obj in add_objs:
+		szr.Add(obj, prop, flag, border)
+	if parent:
+		parent.SetSizer(szr)
+	return szr
 
 def static_box_sizer(parent, s, orient=wx.VERTICAL):
 	sb = wx.StaticBox(parent, wx.ID_ANY, s)
@@ -2706,7 +2931,7 @@ def set_val(obj, v):
 		obj_refresh(obj)
 
 def obj_refresh(obj):
-	if type(obj) is wx.lib.agw.customtreectrl.GenericTreeItem:
+	if type(obj) is CT.GenericTreeItem:
 		while obj.GetParent():
 			obj = obj.GetParent()
 		tree = obj.GetData()
@@ -2751,6 +2976,25 @@ def path_expand_cmd(path):
 def prn_dict(dic):
 	for (k,v) in dic.items():
 		print (k, ':', v)
+
+def set_process_nice(proc, value):
+	try:
+		proc.set_nice(value)
+	except Exception:
+		return False
+	return True
+
+def set_process_cpu_affinity(proc, cpus):
+	try:
+		proc.set_cpu_affinity(cpus)
+	except Exception:
+		return False
+	return True
+
+def set_scheduling_policy(proc, policy, priority):
+	param = ctypes.c_int(priority)
+	err = libc.sched_setscheduler(proc.pid, policy, ctypes.byref(param))
+	return err == 0
 
 if __name__ == "__main__":
 	path = rtmgr_src_dir() + 'btnrc'

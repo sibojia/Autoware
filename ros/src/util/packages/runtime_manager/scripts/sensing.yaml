@@ -23,9 +23,9 @@ subs :
           CalibrationFile :
             prop  : 1
             flags : [ center_v ]
-      - name : PointGrey Grasshoper 3 (USB2)
+      - name : PointGrey Generic
         probe:
-        run  :
+        run  : roslaunch pointgrey_camera_driver camera.launch
       - name : PointGrey LadyBug 5
         probe:
         run  : roslaunch pointgrey ladybug.launch
@@ -51,7 +51,12 @@ subs :
     subs :
       - name : Javad Delta 3 (TTY1)
         probe: 'lsusb -d 0584: > /dev/null' # probed if serial converter is connected
-        run  : rosrun javad gnss.sh
+        run  : rosrun javad_navsat_driver gnss.sh
+        param: serial
+      - name : Serial GNSS
+        probe: 
+        run  : roslaunch nmea_navsat nmea_navsat.launch
+        param: serial
 
   - name : IMU
     subs :
@@ -63,7 +68,7 @@ subs :
     subs :
       - name : Velodyne HDL-64e-S2
         probe: 'ifconfig eth0 | grep "192.168.1.105" > /dev/null'
-        run  : roslaunch velodyne velodyne_hdl64e_s2.launch
+        run  : roslaunch velodyne_pointcloud velodyne_hdl64e_s2.launch
         param: calibration_path
         gui  :
           calibration :
@@ -71,7 +76,7 @@ subs :
             flags : [ center_v ]
       - name : Velodyne HDL-64e-S3
         probe: 'ifconfig eth0 | grep "192.168.1.105" > /dev/null'
-        run  : roslaunch velodyne velodyne_hdl64e_s3.launch
+        run  : roslaunch velodyne_pointcloud velodyne_hdl64e_s3.launch
         param: calibration_path
         gui  :
           calibration :
@@ -79,7 +84,7 @@ subs :
             flags : [ center_v ]
       - name : Velodyne HDL-32e
         probe: 'ping -c 1 -W 1 192.168.1.201 > /dev/null'
-        run  : roslaunch velodyne velodyne_hdl32e.launch
+        run  : roslaunch velodyne_pointcloud velodyne_hdl32e.launch
         param: calibration_path
         gui  :
           calibration :
@@ -87,7 +92,7 @@ subs :
             flags : [ center_v ]
       - name : Velodyne VLP-16
         probe: 
-        run  : roslaunch velodyne velodyne_vlp16.launch
+        run  : roslaunch velodyne_pointcloud velodyne_vlp16.launch
         param: calibration_path
         gui  :
           calibration :
@@ -161,6 +166,7 @@ params :
       cmd_param :
         dash : ''
         delim: ':='
+        must : True
 
   - name  : calibration_path_grasshopper3
     vars  :
@@ -171,6 +177,7 @@ params :
         dash        : ''
         delim       : ':='
         only_enable : True
+        must        : True
   - name  : calibration_path_ladybug
     vars  :
     - name  : CalibrationFile
@@ -180,6 +187,7 @@ params :
         dash        : ''
         delim       : ':='
         only_enable : True
+        must        : True
 
 #  - name  : points_image
 #    vars  :
@@ -243,3 +251,22 @@ params :
 #      cmd_param :
 #        dash : ''
 #        delim: ':='
+
+  - name : serial
+    vars :
+    - name      : port
+      label     : 'Device name:'
+      kind      : path
+      v         : /dev/ttyUSB0
+      cmd_param :
+        dash      : ''
+        delim     : ':='
+    - name      : baud
+      label     : 'Baud:'
+      kind      : menu
+      choices   : [ '1200', '2400', '4800', '9600', '19200', '38400', '57600', '115200', '230400' ]
+      choices_type : str
+      v         : '9600'
+      cmd_param :
+        dash      : ''
+        delim     : ':='

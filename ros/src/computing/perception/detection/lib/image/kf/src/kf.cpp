@@ -396,6 +396,21 @@ void initTracking(cv::LatentSvmDetector::ObjectDetection object, std::vector<kst
 	cv::setIdentity(KF.measurementNoiseCov, cv::Scalar::all(MEAS_NOISE_COV));//1e-3
 	cv::setIdentity(KF.errorCovPost, cv::Scalar::all(ERROR_ESTIMATE_COV));//100
 
+	//clip detection
+	//check that predicted positions are inside the image
+	if (detection.rect.x < 0)
+		detection.rect.x = 0;
+	if (detection.rect.x > image.cols)
+		detection.rect.x = image.cols - 1;
+	if (detection.rect.y < 0)
+		detection.rect.y = 0;
+	if (detection.rect.height > image.rows)
+		detection.rect.height = image.rows - 1;
+	if (detection.rect.width + detection.rect.x > image.cols)
+		detection.rect.width = image.cols - detection.rect.x;
+	if (detection.rect.height + detection.rect.y > image.rows)
+		detection.rect.height = image.rows - detection.rect.y;
+
 	//save data to kstate
 	new_state.active = true;
 	new_state.image = image(cv::Rect(detection.rect.x,
@@ -448,6 +463,101 @@ bool alreadyMatched(int check_index, std::vector<int>& matched_indices)
 			return true;
 	}
 	return false;
+}
+
+void Sort(const std::vector<float> in_scores, std::vector<unsigned int>& in_out_indices)
+{
+	for (unsigned int i = 0; i < in_scores.size(); i++)
+		for (unsigned int j = i + 1; j < in_scores.size(); j++)
+		{
+			if (in_scores[in_out_indices[j]] > in_scores[in_out_indices[i]])
+			{
+				//float x_tmp = x[i];
+				int index_tmp = in_out_indices[i];
+				//x[i] = x[j];
+				in_out_indices[i] = in_out_indices[j];
+				//x[j] = x_tmp;
+				in_out_indices[j] = index_tmp;
+			}
+		}
+}
+
+void ApplyNonMaximumSuppresion(std::vector< kstate >& in_source, float in_nms_threshold)
+{
+	std::vector< kstate > tmp_source = in_source;
+
+	if (tmp_source.empty())
+		return ;
+
+	unsigned int size = in_source.size();
+
+	std::vector<float> area(size);
+	std::vector<float> scores(size);
+	std::vector<int> x1(size);
+	std::vector<int> y1(size);
+	std::vector<int> x2(size);
+	std::vector<int> y2(size);
+	std::vector<unsigned int> indices(size);
+	std::vector<bool> is_suppresed(size);
+
+	for(unsigned int i = 0; i< in_source.size(); i++)
+	{
+		kstate tmp = in_source[i];
+		area[i] = tmp.pos.width * tmp.pos.height;
+		indices[i] = i;
+		is_suppresed[i] = false;
+		scores[i] = tmp.score;
+		x1[i] = tmp.pos.x;
+		y1[i] = tmp.pos.y;
+		x2[i] = tmp.pos.width + tmp.pos.x;
+		y2[i] = tmp.pos.height + tmp.pos.y;
+	}
+
+	Sort(scores, indices);//returns indices ordered based on scores
+
+	for(unsigned int i=0; i< size; i++)
+	{
+		if(!is_suppresed[indices[i]])
+		{
+			for(unsigned int j= i+1; j< size; j++)
+			{
+				int x1_max = std::max(x1[indices[i]], x1[indices[j]]);
+				int x2_min = std::min(x2[indices[i]], x2[indices[j]]);
+				int y1_max = std::max(y1[indices[i]], y1[indices[j]]);
+				int y2_min = std::min(y2[indices[i]], y2[indices[j]]);
+				int overlap_width = x2_min - x1_max + 1;
+				int overlap_height = y2_min - y1_max + 1;
+				if(overlap_width > 0 && overlap_height>0)
+				{
+					float overlap_part = (overlap_width*overlap_height)/area[indices[j]];
+					if(overlap_part > in_nms_threshold)
+					{
+						is_suppresed[indices[j]] = true;
+					}
+				}
+			}
+		}
+	}
+
+	unsigned int size_out = 0;
+	for (unsigned int i = 0; i < size; i++)
+	{
+		if (!is_suppresed[i])
+			size_out++;
+	}
+
+	std::vector< kstate > filtered_detections(size_out);
+
+	unsigned int index = 0;
+	for(unsigned int i = 0 ; i < size_out; i++)
+	{
+		if(!is_suppresed[indices[i]])
+		{
+			filtered_detections[index] = in_source[indices[i]];//x1[indices[i]];
+			index++;
+		}
+	}
+	in_source = filtered_detections;
 }
 
 void doTracking(std::vector<cv::LatentSvmDetector::ObjectDetection>& detections, int frameNumber,
@@ -618,7 +728,7 @@ void doTracking(std::vector<cv::LatentSvmDetector::ObjectDetection>& detections,
 			initTracking(objects[i], kstates, detections[i], image, colors, _ranges[i]);
 		}
 	}
-
+	/*
 	//check overlapping states and remove them
 	float overlap = (OVERLAPPING_PERC/100);
 	std::vector<unsigned int> removedIndices;
@@ -652,7 +762,8 @@ void doTracking(std::vector<cv::LatentSvmDetector::ObjectDetection>& detections,
 				}
 			}
 		}
-	}
+	}*/
+	ApplyNonMaximumSuppresion(kstates, OVERLAPPING_PERC);
 
 	removeUnusedObjects(kstates);
 

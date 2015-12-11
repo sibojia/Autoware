@@ -98,14 +98,15 @@
 #define STEERING_INTERNAL_PERIOD 20 // ms (10ms is too fast for HEV)
 
 // accel/brake parameters
-#define _K_ACCEL_P 30.0
-#define _K_ACCEL_I 2.0
+#define _K_ACCEL_P 40.0 // 30.0
+#define _K_ACCEL_I 0.1 // 5.0
 #define _K_ACCEL_D 2.0
-#define _K_ACCEL_I_CYCLES 100
-#define _ACCEL_MAX_I 600
+#define _K_ACCEL_I_CYCLES 1000
+#define _ACCEL_MAX_I 3000
 #define _ACCEL_STROKE_DELTA_MAX 1000
 #define _ACCEL_RELEASE_STEP 400
 #define _ACCEL_PEDAL_MAX 1700
+#define _ACCEL_PEDAL_OFFSET 200
 
 #define _K_BRAKE_P 40.0
 #define _K_BRAKE_I 10.0
@@ -113,19 +114,27 @@
 #define _K_BRAKE_I_CYCLES 100
 #define _BRAKE_MAX_I 200
 #define _BRAKE_STROKE_DELTA_MAX 1000
+#define _BRAKE_RELEASE_STEP 500
 #define _BRAKE_PEDAL_MAX 4095
 #define _BRAKE_PEDAL_MED 3000
+#define _BRAKE_PEDAL_OFFSET 1000
 
 // steering parameters
 #define _STEERING_MAX_ANGVELSUM 1000
-#define _K_STEERING_TORQUE 10
-#define _K_STEERING_TORQUE_I 0.5
 #define _STEERING_MAX_TORQUE 2000
-#define _STEERING_MAX_SUM 100 //deg*0.1s for I control
+#define _STEERING_MAX_SUM 100
+#define _STEERING_ANGVEL_BOUNDARY 500.0 // deg/s
+#define _STEERING_IGNORE_ERROR 1.0 // deg
 
+// fast PID factors
 #define _K_STEERING_P 60
-#define _K_STEERING_I 12
-#define _K_STEERING_D 10
+#define _K_STEERING_I 5.0
+#define _K_STEERING_D 5.0
+
+// slow PID factors
+#define _K_STEERING_P_SLOW 6.0 // 6.0 // 6.0
+#define _K_STEERING_I_SLOW 6.8 // 7.0 // 5.0
+#define _K_STEERING_D_SLOW 6.1 // 6.0 // 5.0
 
 #define _STEERING_ANGLE_ERROR 0 // deg
 
