@@ -26,7 +26,7 @@
  *  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
  *  OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-*/
+ */
 
 #include <std_msgs/String.h>
 #include <ros/ros.h>
@@ -81,19 +81,10 @@ typedef struct _OBJPOS{
   float distance;
 }OBJPOS;
 
-//for timestamp
-/*
-struct my_tm {
-  time_t tim; // yyyymmddhhmmss
-  long msec;  // milli sec
-};
-*/
-
 static objLocation ol;
 
 //store subscribed value
 static vector<OBJPOS> global_cp_vector;
-//vector<OBJPOS> global_pp_vector;
 
 //flag for comfirming whether updating position or not
 static bool gnssGetFlag;
@@ -117,22 +108,14 @@ static ros::Publisher pub;
 
 static std::string object_type;
 
-#ifdef NEVER // XXX No one calls this functions
-static void printDiff(struct timeval begin, struct timeval end){
-  long diff;
-  diff = (end.tv_sec - begin.tv_sec)*1000*1000 + (end.tv_usec - begin.tv_usec);
-  printf("Diff: %ld us (%ld ms)\n",diff,diff/1000);
-}
-#endif
-
 static void projection_callback(const calibration_camera_lidar::projection_matrix& msg)
 {
-	for (int row=0; row<4; row++) {
-		for (int col=0; col<4; col++) {
-			cameraMatrix[row][col] = msg.projection_matrix[row * 4 + col];
-		}
-	}
-	ready_ = true;
+  for (int row=0; row<4; row++) {
+    for (int col=0; col<4; col++) {
+      cameraMatrix[row][col] = msg.projection_matrix[row * 4 + col];
+    }
+  }
+  ready_ = true;
 }
 
 static void camera_info_callback(const sensor_msgs::CameraInfo& msg)
@@ -153,9 +136,9 @@ void GetRPY(const geometry_msgs::Pose &pose,
   tf::Matrix3x3(q).getRPY(roll,pitch,yaw);
 
   //reverse angle value
-  roll = -roll;
+  roll  = -roll;
   pitch = -pitch;
-  yaw = -yaw;
+  yaw   = -yaw;
 }
 
 void makeSendDataDetectedObj(vector<OBJPOS> car_position_vector,
@@ -176,7 +159,6 @@ void makeSendDataDetectedObj(vector<OBJPOS> car_position_vector,
     //convert
     ol.setOriginalValue(U,V,cp_iterator->distance);
     LOCATION ress = ol.cal();
-    //printf("coordinate from own:%f,%f,%f\n",ress.X,ress.Y,ress.Z);
 
     axiMove am;
     //convert axes from camera to velodyne
@@ -189,7 +171,7 @@ void makeSendDataDetectedObj(vector<OBJPOS> car_position_vector,
       rectangular coordinate is that axial x is the direction to left and right,
       axial y is the direction to front and backend and axial z is the direction to upper and lower.
       So convert them.
-     */
+    */
     rescoord.X = anglefixed.X;
     rescoord.Y = anglefixed.Y;
     rescoord.Z = anglefixed.Z;
@@ -212,8 +194,7 @@ void makeSendDataDetectedObj(vector<OBJPOS> car_position_vector,
 void locatePublisher(vector<OBJPOS> car_position_vector){
   //get values from sample_corner_point , convert latitude and longitude,
   //and send database server.
-  
-  //  geometry_msgs::PoseArray pose_msg;
+
   cv_tracker::obj_label obj_label_msg;
 
   vector<OBJPOS>::iterator cp_iterator;
@@ -235,56 +216,50 @@ void locatePublisher(vector<OBJPOS> car_position_vector){
   ndtGetFlag = false;
 
   //If position is over range,skip loop
-  if((!(mloc.X > 180.0 && mloc.X < -180.0 ) || 
-      (mloc.Y > 180.0 && mloc.Y < -180.0 ) || 
+  if((!(mloc.X > 180.0 && mloc.X < -180.0 ) ||
+      (mloc.Y > 180.0 && mloc.Y < -180.0 ) ||
       mloc.Z < 0.0) ){
 
     //get data of car and pedestrian recognizing
-  if(!car_position_vector.empty()){
+    if(!car_position_vector.empty()){
       makeSendDataDetectedObj(car_position_vector,cp_iterator,mloc,mang,obj_label_msg);
     }
   }
   //publish recognized car data
- //     if(pose_msg.poses.size() != 0){
-        // pose_msg.header.stamp = ros::Time::now();
-        // pose_msg.header.frame_id = "map";
   obj_label_msg.type = object_type;
   pub.publish(obj_label_msg);
-   //   }
 }
 
 static void obj_pos_xyzCallback(const cv_tracker::image_obj_tracked& fused_objects)
 {
-	if (!ready_)
-		return;
+  if (!ready_)
+    return;
 
   vector<OBJPOS> cp_vector;
   OBJPOS cp;
-  
+
   object_type = fused_objects.type;
   //If angle and position data is not updated from prevous data send,
   //data is not sent
   if(gnssGetFlag || ndtGetFlag) {
     for (unsigned int i = 0; i < fused_objects.rect_ranged.size(); i++){
-      
+
       //If distance is zero, we cannot calculate position of recognized object
       //so skip loop
       if(fused_objects.rect_ranged.at(i).range <= 0) continue;
-      
-      cp.x1 = fused_objects.rect_ranged.at(i).rect.x;//x-axis of the upper left
-      cp.y1 = fused_objects.rect_ranged.at(i).rect.y;//x-axis of the lower left
-      cp.x2 = fused_objects.rect_ranged.at(i).rect.width;//x-axis of the upper right
-      cp.y2 = fused_objects.rect_ranged.at(i).rect.height;//x-axis of the lower left
-      
+
+      cp.x1 = fused_objects.rect_ranged.at(i).rect.x;      // x-axis of the upper left
+      cp.y1 = fused_objects.rect_ranged.at(i).rect.y;      // y-axis of the upper left
+      cp.x2 = fused_objects.rect_ranged.at(i).rect.width;  // width of detection rectangle
+      cp.y2 = fused_objects.rect_ranged.at(i).rect.height; // height of detection rectangle
+
       cp.distance = fused_objects.rect_ranged.at(i).range;
-      
-      //printf("\ncar : %d,%d,%d,%d,%f\n",cp.x1,cp.y1,cp.x2,cp.y2,cp.distance);
-      
-      cp_vector.push_back(cp);      
+
+      cp_vector.push_back(cp);
     }
-    
+
     locatePublisher(cp_vector);
-    
+
   }
 }
 
@@ -316,12 +291,11 @@ static void position_getter_ndt(const geometry_msgs::PoseStamped &pose){
   printf("location : %f %f %f\n",ndt_loc.X,ndt_loc.Y,ndt_loc.Z);
 
   ndtGetFlag = true;
-  //printf("my position : %f %f %f\n",my_loc.X,my_loc.Y,my_loc.Z);
 }
 
 int main(int argc, char **argv){
-  
-  ros::init(argc ,argv, "obj_reproj") ;  
+
+  ros::init(argc ,argv, "obj_reproj") ;
   cout << "obj_reproj" << endl;
 
   ready_ = false;
@@ -335,73 +309,12 @@ int main(int argc, char **argv){
   ros::NodeHandle private_nh("~");
 
   ros::Subscriber obj_pos_xyz = n.subscribe("image_obj_tracked", 1, obj_pos_xyzCallback);
-  //ros::Subscriber pedestrian_pos_xyz = n.subscribe("/pedestrian_pixel_xyz", 1, pedestrian_pos_xyzCallback);
 
-  /*
-  ros::Subscriber azm = n.subscribe("/vel", 1, azimuth_getter);
-  ros::Subscriber my_pos = n.subscribe("/fix", 1, position_getter);
-  ros::Subscriber ndt = n.subscribe("/current_pose", 1, position_getter_ndt);
-  */
-  //ros::Subscriber gnss_pose = n.subscribe("/gnss_pose", 1, position_getter_gnss);
   ros::Subscriber ndt_pose = n.subscribe("/current_pose", 1, position_getter_ndt);
-  pub = n.advertise<cv_tracker::obj_label>("obj_label",1); 
+  pub = n.advertise<cv_tracker::obj_label>("obj_label",1);
 
   ros::Subscriber projection = n.subscribe("/projection_matrix", 1, projection_callback);
   ros::Subscriber camera_info = n.subscribe("/camera/camera_info", 1, camera_info_callback);
-
-  /*
-  //read calibration value
-  //TO DO : subscribe from topic
-  cv::Mat Cintrinsic;
-  std::string camera_yaml;
-
-  n.param<std::string>("/scan2image/camera_yaml", camera_yaml,STR(CAMERA_YAML));
-
-  cv::FileStorage camera_file(camera_yaml.c_str(), cv::FileStorage::READ); 
-  if(!camera_file.isOpened()){
-    fprintf(stderr,"%s, : cannot open file\n",camera_yaml.c_str());
-    exit(EXIT_FAILURE);
-  }
-  camera_file["intrinsic"] >> Cintrinsic; 
-  camera_file.release(); 
-
-  double fkx = Cintrinsic.at<float>(0,0);
-  double fky = Cintrinsic.at<float>(1,1);
-  double Ox = Cintrinsic.at<float>(0,2);
-  double Oy = Cintrinsic.at<float>(1,2);
-  */
-
-  // double fkx = 1360.260477;
-  // double fky = 1360.426247;
-  // double Ox = 440.017336;
-  // double Oy = 335.274106;
-
-/*  std::string lidar_3d_yaml = "";
-
-  if (private_nh.getParam("lidar_3d_yaml", lidar_3d_yaml) == false) {
-      std::cerr << "error! usage : rosrun  cv_tracker obj_reproj _lidar_3d_yaml:=[file]" << std::endl;
-      exit(-1);
-  }
-
-  cv::FileStorage lidar_3d_file(lidar_3d_yaml.c_str(), cv::FileStorage::READ); 
-  if(!lidar_3d_file.isOpened()){
-    fprintf(stderr,"%s, : cannot open file\n",lidar_3d_yaml.c_str());
-    exit(EXIT_FAILURE);
-  }
-  lidar_3d_file["CameraExtrinsicMat"] >> Lintrinsic; 
-  lidar_3d_file.release(); 
-*/
-
-
-
-  /*
-  double fkx = 5.83199829e+02;
-  double fky = 3.74826355e+02;
-  double Ox =  5.83989319e+02;
-  double Oy = 2.41745468e+02;
-  */
-
-  // ol.setCameraParam(fkx,fky,Ox,Oy);
 
   //set angle and position flag : false at first
   gnssGetFlag = false;
