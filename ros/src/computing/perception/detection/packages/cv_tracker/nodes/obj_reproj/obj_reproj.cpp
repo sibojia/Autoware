@@ -108,6 +108,9 @@ static ros::Publisher pub;
 
 static std::string object_type;
 
+//coordinate system conversion between camera coordinate and map coordinate
+static tf::StampedTransform transformCam2Map;
+
 static void projection_callback(const calibration_camera_lidar::projection_matrix& msg)
 {
   for (int row=0; row<4; row++) {
@@ -147,7 +150,6 @@ void makeSendDataDetectedObj(vector<OBJPOS> car_position_vector,
                              ANGLE angle,
                              cv_tracker::obj_label& send_data)
 {
-  LOCATION rescoord;
   geometry_msgs::Point tmpPoint;
 
   for(uint i=0; i<car_position_vector.size() ; i++, cp_iterator++){
@@ -156,35 +158,17 @@ void makeSendDataDetectedObj(vector<OBJPOS> car_position_vector,
     double U = cp_iterator->x1 + cp_iterator->x2/2;
     double V = cp_iterator->y1 + cp_iterator->y2/2;
 
-    //convert
+    //convert from "image" coordinate system to "camera" coordinate system
     ol.setOriginalValue(U,V,cp_iterator->distance);
     LOCATION ress = ol.cal();
 
-    axiMove am;
-    //convert axes from camera to velodyne
-    LOCATION velocoordinate = am.cal(ress,cameraMatrix);
+    /* convert from "camera" coordinate system to "map" coordinate system */
+    tf::Vector3 pos_in_camera_coord(ress.X, ress.Y, ress.Z);
+    tf::Vector3 converted = transformCam2Map * pos_in_camera_coord;
 
-    //convert axes to north direction 0 angle.
-    LOCATION anglefixed = am.cal(velocoordinate,angle);
-
-    /*
-      rectangular coordinate is that axial x is the direction to left and right,
-      axial y is the direction to front and backend and axial z is the direction to upper and lower.
-      So convert them.
-    */
-    rescoord.X = anglefixed.X;
-    rescoord.Y = anglefixed.Y;
-    rescoord.Z = anglefixed.Z;
-
-    //add plane rectangular coordinate to that of target object.
-    rescoord.X += mloc.X;
-    rescoord.Y += mloc.Y;
-    rescoord.Z += mloc.Z;
-
-    /* Set the position of this object */
-    tmpPoint.x = rescoord.X;
-    tmpPoint.y = rescoord.Y;
-    tmpPoint.z = rescoord.Z;
+    tmpPoint.x = converted.x();
+    tmpPoint.y = converted.y();
+    tmpPoint.z = converted.z();
 
     send_data.reprojected_pos.push_back(tmpPoint);
   }
@@ -253,7 +237,12 @@ static void obj_pos_xyzCallback(const cv_tracker::image_obj_tracked& fused_objec
       cp.x2 = fused_objects.rect_ranged.at(i).rect.width;  // width of detection rectangle
       cp.y2 = fused_objects.rect_ranged.at(i).rect.height; // height of detection rectangle
 
-      cp.distance = fused_objects.rect_ranged.at(i).range;
+      /*
+        As cameraMatrix[0][3] is offset from lidar to camera,
+        this cp.distance is z-axis value of detected object in camera coordinate system.
+        (As received distance is in [cm] unit, I convert unit from [cm] to [mm] here)
+      */
+      cp.distance = (fused_objects.rect_ranged.at(i).range - cameraMatrix[0][3]) * 10;
 
       cp_vector.push_back(cp);
     }
@@ -320,7 +309,20 @@ int main(int argc, char **argv){
   gnssGetFlag = false;
   ndtGetFlag = false;
 
-  ros::spin();
+  tf::TransformListener listener;
+  while(n.ok())
+    {
+      /* try to get coordinate system conversion from "camera" to "map" */
+      try {
+        listener.lookupTransform("map", "camera", ros::Time(0), transformCam2Map);
+      }
+      catch (tf::TransformException ex) {
+        ROS_INFO("%s", ex.what());
+        ros::Duration(0.1).sleep();
+      }
 
+      ros::spinOnce();
+
+    }
   return 0;
 }

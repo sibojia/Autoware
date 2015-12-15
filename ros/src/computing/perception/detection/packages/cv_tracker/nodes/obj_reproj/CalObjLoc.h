@@ -62,9 +62,9 @@ public:
         res.Y = (V-Oy)*res.Z/fky;
 
 		//mili meter -> meter
-        res.X = res.X/100;
-        res.Y = res.Y/100;
-		res.Z = res.Z/100;
+        res.X = res.X/1000;
+        res.Y = res.Y/1000;
+		res.Z = res.Z/1000;
 
         return res;
     }
