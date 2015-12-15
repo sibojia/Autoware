@@ -66,6 +66,7 @@
 #include "CalObjLoc.h"
 #include "cv_tracker/obj_label.h"
 #include "calibration_camera_lidar/projection_matrix.h"
+#include <sensor_msgs/CameraInfo.h>
 
 #define XSTR(x) #x
 #define STR(x) XSTR(x)
@@ -132,6 +133,15 @@ static void projection_callback(const calibration_camera_lidar::projection_matri
 		}
 	}
 	ready_ = true;
+}
+
+static void camera_info_callback(const sensor_msgs::CameraInfo& msg)
+{
+  double fkx = msg.K[0 * 3 + 0]; // get K[0][0]
+  double fky = msg.K[1 * 3 + 1]; // get K[1][1]
+  double Ox  = msg.K[0 * 3 + 2]; // get K[0][2]
+  double Oy  = msg.K[1 * 3 + 2]; // get K[1][2]
+  ol.setCameraParam(fkx,fky,Ox,Oy);
 }
 
 void GetRPY(const geometry_msgs::Pose &pose,
@@ -337,6 +347,7 @@ int main(int argc, char **argv){
   pub = n.advertise<cv_tracker::obj_label>("obj_label",1); 
 
   ros::Subscriber projection = n.subscribe("/projection_matrix", 1, projection_callback);
+  ros::Subscriber camera_info = n.subscribe("/camera/camera_info", 1, camera_info_callback);
 
   /*
   //read calibration value
@@ -360,10 +371,10 @@ int main(int argc, char **argv){
   double Oy = Cintrinsic.at<float>(1,2);
   */
 
-  double fkx = 1360.260477;
-  double fky = 1360.426247;
-  double Ox = 440.017336;
-  double Oy = 335.274106;
+  // double fkx = 1360.260477;
+  // double fky = 1360.426247;
+  // double Ox = 440.017336;
+  // double Oy = 335.274106;
 
 /*  std::string lidar_3d_yaml = "";
 
@@ -390,7 +401,7 @@ int main(int argc, char **argv){
   double Oy = 2.41745468e+02;
   */
 
-  ol.setCameraParam(fkx,fky,Ox,Oy);
+  // ol.setCameraParam(fkx,fky,Ox,Oy);
 
   //set angle and position flag : false at first
   gnssGetFlag = false;
