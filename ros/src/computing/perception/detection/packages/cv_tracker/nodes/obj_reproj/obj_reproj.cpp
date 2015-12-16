@@ -105,11 +105,75 @@ static double cameraMatrix[4][4] = {
 };
 
 static ros::Publisher pub;
+static ros::Publisher marker_pub;
 
 static std::string object_type;
 
 //coordinate system conversion between camera coordinate and map coordinate
 static tf::StampedTransform transformCam2Map;
+
+static visualization_msgs::MarkerArray convert_marker_array(const cv_tracker::obj_label& src)
+{
+  visualization_msgs::MarkerArray ret;
+  int index = 0;
+  std_msgs::ColorRGBA color_red;
+  color_red.r = 1.0f;
+  color_red.g = 0.0f;
+  color_red.b = 0.0f;
+  color_red.a = 1.0f;
+
+  std_msgs::ColorRGBA color_blue;
+  color_blue.r = 0.0f;
+  color_blue.g = 0.0f;
+  color_blue.b = 1.0f;
+  color_blue.a = 1.0f;
+  
+  std_msgs::ColorRGBA color_green;
+  color_green.r = 0.0f;
+  color_green.g = 1.0f;
+  color_green.b = 0.0f;
+  color_green.a = 1.0f;
+  
+  for (const auto& reproj_pos : src.reprojected_pos)
+    {
+      visualization_msgs::Marker marker;
+      /* Set frame ID */
+      marker.header.frame_id = "map";
+
+      /* Set namespace adn id for this marker */
+      marker.ns = object_type;
+      marker.id = index;
+      index++;
+
+      /* Set marker shape */
+      marker.type = visualization_msgs::Marker::SPHERE;
+
+      /* set pose of marker  */
+      marker.pose.position = reproj_pos;
+
+      /* set scale of marker */
+      marker.scale.x = (double)1.5;
+      marker.scale.y = (double)1.5;
+      marker.scale.z = (double)1.5;
+
+      /* set color */
+      if (object_type == "car") {
+        marker.color = color_blue;
+      }
+      else if (object_type == "person") {
+        marker.color = color_green;
+      }
+      else {
+        marker.color = color_red;
+      }
+
+      marker.lifetime = ros::Duration(0.3);
+
+      ret.markers.push_back(marker);
+    }
+
+  return ret;
+}
 
 static void projection_callback(const calibration_camera_lidar::projection_matrix& msg)
 {
@@ -180,6 +244,7 @@ void locatePublisher(vector<OBJPOS> car_position_vector){
   //and send database server.
 
   cv_tracker::obj_label obj_label_msg;
+  visualization_msgs::MarkerArray obj_label_marker_msgs;
 
   vector<OBJPOS>::iterator cp_iterator;
   LOCATION mloc;
@@ -211,7 +276,9 @@ void locatePublisher(vector<OBJPOS> car_position_vector){
   }
   //publish recognized car data
   obj_label_msg.type = object_type;
+  obj_label_marker_msgs = convert_marker_array(obj_label_msg);
   pub.publish(obj_label_msg);
+  marker_pub.publish(obj_label_marker_msgs);
 }
 
 static void obj_pos_xyzCallback(const cv_tracker::image_obj_tracked& fused_objects)
@@ -301,6 +368,7 @@ int main(int argc, char **argv){
 
   ros::Subscriber ndt_pose = n.subscribe("/current_pose", 1, position_getter_ndt);
   pub = n.advertise<cv_tracker::obj_label>("obj_label",1);
+  marker_pub = n.advertise<visualization_msgs::MarkerArray>("obj_label_marker", 1);
 
   ros::Subscriber projection = n.subscribe("/projection_matrix", 1, projection_callback);
   ros::Subscriber camera_info = n.subscribe("/camera/camera_info", 1, camera_info_callback);
